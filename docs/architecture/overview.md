@@ -1,86 +1,68 @@
-# Orbit NoSQL Mongo: architecture and boundaries
+# Architecture
 
-## Responsibility
+## Responsibility and dependency direction
 
-`orbit-nosql-mongo` is the MongoDB provider adapter for the `orbit-nosql` capability and shared
-`orbit-data.Repository` contract. It uses PyMongo's native asyncio API and provides an optional
-Core plugin that owns the async client through the application container. Core, `orbit-data`, and
-`orbit-nosql` do not depend on PyMongo.
+`orbit-nosql-mongo` adapts MongoDB to the `orbit-nosql` capability and the shared
+`orbit-data.Repository` contract. It owns PyMongo client configuration, Mongo collection access,
+document mapping, provider error handling, and client cleanup. It does not own application schemas,
+business transactions, or MongoDB deployment topology.
 
-```bash
-python -m pip install orbit-core orbit-data orbit-nosql orbit-nosql-mongo
+```text
+Application modules -> orbit-data -> orbit-nosql -> orbit-nosql-mongo -> PyMongo Async -> MongoDB
+                            ^              ^
+                      shared repository  provider-neutral NoSQL contract
 ```
 
-## Declared dependencies
+Core is optional and is used only for the application resource lifecycle. `orbit-data` and
+`orbit-nosql` do not import PyMongo. Applications can instantiate `MongoDatabase` directly without
+installing Core. `MongoPlugin` lives in the plugin submodule and the optional `core` extra adds its
+Core dependency, keeping Core outside the adapter's base dependency graph.
 
-The following dependency declarations come from the checked-in manifests. Optional groups and development dependencies are called out separately.
+## Resource lifecycle
 
-### `pyproject.toml`
-- `orbit-core>=0.1.0a1,<0.2`
-- `orbit-data>=0.1.0a1,<0.2`
-- `orbit-nosql>=0.1.0a1,<0.2`
-- `pymongo>=4.9,<5`
-- Optional `dev` group: `pytest>=8,<10`, `pytest-asyncio>=0.24,<2`, `ruff>=0.8,<1`, `mypy>=1.13,<2`.
+Creating the plugin and registering its resource performs no network I/O. The container creates
+`AsyncMongoClient` on first resolution, checks connectivity with `ping`, and yields a
+`MongoDatabase` that owns both the selected database handle and client. Core calls the resource
+cleanup when the application stops. Direct users must call `MongoDatabase.aclose()` themselves.
+Cleanup is shared by concurrent callers, and caller cancellation does not interrupt client close.
 
-Declared dependencies do not mean that optional providers or services are bundled with this package.
+The plugin is lazy; successful application startup alone does not prove MongoDB is reachable. To
+make database connectivity part of readiness, resolve the resource during the application's startup
+or readiness hook and treat resolution failure as startup/readiness failure.
 
-## Implementation layout
+## Document mapping and repository behavior
 
-Representative implementation files in this checkout:
+`MongoDatabase.repository(collection, model, key_field="id")` creates a typed
+`MongoRepository`. The selected model field maps to MongoDB's `_id`; other fields use their simple
+Pydantic serialization and validation aliases. Ambiguous aliases and complex alias paths are
+rejected when the repository is constructed. A null or missing key cannot be inserted.
 
-- `.tox/wheel-install-current/orbit_nosql_mongo/__init__.py`
-- `.tox/wheel-install-current/orbit_nosql_mongo/config.py`
-- `.tox/wheel-install-current/orbit_nosql_mongo/plugin.py`
-- `.tox/wheel-install-current/orbit_nosql_mongo/repository.py`
-- `.tox/wheel-install-final/orbit_nosql_mongo/__init__.py`
-- `.tox/wheel-install-final/orbit_nosql_mongo/config.py`
-- `.tox/wheel-install-final/orbit_nosql_mongo/plugin.py`
-- `.tox/wheel-install-final/orbit_nosql_mongo/repository.py`
-- `.tox/wheel-install-verified/orbit_nosql_mongo/__init__.py`
-- `.tox/wheel-install-verified/orbit_nosql_mongo/config.py`
-- `.tox/wheel-install-verified/orbit_nosql_mongo/plugin.py`
-- `.tox/wheel-install-verified/orbit_nosql_mongo/repository.py`
-- `src/orbit_nosql_mongo/__init__.py`
-- `src/orbit_nosql_mongo/config.py`
-- `src/orbit_nosql_mongo/database.py`
-- `src/orbit_nosql_mongo/plugin.py`
-- `src/orbit_nosql_mongo/repository.py`
+The repository supports `get`, `list`, `add`, `update`, and `delete`:
 
-## Public contract and scope
+- `get` reads by `_id` and validates the returned document as the model.
+- `list` sorts by `_id` and materializes at most the caller's limit (1–10,000; default 100).
+- `add` inserts and maps duplicate-key errors to `RepositoryConflictError`.
+- `update` replaces an existing document without upsert and reports whether it matched.
+- `delete` reports whether a document existed.
 
-## Repository adapter
+Driver errors are translated to sanitized `MongoOperationError` instances. Invalid stored model
+data raises `MongoDocumentError`; it is not silently repaired or returned as an untyped mapping.
+Each repository method is one MongoDB operation. This adapter does not implement
+`orbit_data.UnitOfWork` or multi-document transactions. Mongo transactions require a supported
+replica-set or sharded deployment and a future explicit session contract.
 
-The resolved resource implements `orbit_nosql.NoSQLDatabase`; it binds typed repositories to named
-collections and owns the driver database and client lifecycle. `MongoRepository` implements
-`orbit_data.Repository` for a Pydantic model and an async collection.
-The model's `id` field maps to MongoDB's `_id` field by default; `key_field` selects another model
-field. `get`, `list`, `add`, `update`, and `delete` follow the repository contract. Lists are
-bounded, sorted by `_id`, and return detached validated models. Duplicate `_id` writes raise the
-provider-neutral `RepositoryConflictError`; provider and model-validation errors are sanitized.
+## Source layout
 
-```python
-from pydantic import BaseModel
+- `src/orbit_nosql_mongo/config.py` validates URI, database, selection timeout, and client pool size.
+- `src/orbit_nosql_mongo/plugin.py` registers the lazy Core-owned resource.
+- `src/orbit_nosql_mongo/database.py` owns the client and creates typed repositories.
+- `src/orbit_nosql_mongo/repository.py` maps Pydantic models to bounded Mongo CRUD operations.
+- `tests/test_mongo.py` checks repository semantics and lifecycle with fakes.
+- `tests/test_mongo_integration.py` provides an opt-in service test; it is not a substitute for
+  replica-set, TLS, failover, or deployment validation.
 
-from orbit_nosql_mongo import MongoRepository, MONGO_DATABASE_KEY
+## Declared runtime dependencies
 
-
-class Order(BaseModel):
-    id: str
-    status: str
-
-
-database = await application.container.aresolve(MONGO_DATABASE_KEY)
-orders = database.repository("orders", Order)
-await orders.add(Order(id="order-1", status="new"))
-```
-
-This adapter currently provides per-operation repository methods, not `orbit_data.UnitOfWork`.
-MongoDB multi-document transactions require a deployment that supports sessions and transactions;
-this package does not imply transaction support for standalone servers. The opt-in integration test
-uses `ORBIT_MONGO_URI` to exercise the Core plugin, connection ping, repository CRUD/list, and
-application-owned client cleanup against a disposable MongoDB server. It does not test replica-set
-transactions, authentication, TLS, failover, or production topology.
-
-## Boundary rules
-
-Keep provider SDKs, credentials, transports, and provider-specific error translation in provider adapters. Keep reusable capability contracts in the matching capability package and lifecycle orchestration in Core. Apply the relevant layer for this repository and preserve the dependency direction shown above.
+The package's base dependencies are `orbit-data`, `orbit-nosql`, and `pymongo`. The `core` extra
+adds `orbit-core` for lifecycle integration. Test and lint tools are development dependencies, not
+runtime dependencies.

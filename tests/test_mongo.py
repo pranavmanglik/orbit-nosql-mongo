@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import asyncio
+import tomllib
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -29,15 +31,23 @@ from pydantic import BaseModel, Field, SecretStr
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from orbit_nosql_mongo import (
-    MONGO_DATABASE_KEY,
     MongoConfig,
     MongoDatabase,
     MongoDocumentError,
     MongoOperationError,
-    MongoPlugin,
     MongoRepository,
 )
 from orbit_nosql_mongo import plugin as plugin_module
+from orbit_nosql_mongo.plugin import MONGO_DATABASE_KEY, MongoPlugin
+
+
+def test_core_lifecycle_dependency_is_optional() -> None:
+    """The provider adapter does not require Core unless users install its plugin extra."""
+    manifest = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]
+    assert not any(dependency.startswith("orbit-core") for dependency in manifest["dependencies"])
+    assert manifest["optional-dependencies"]["core"] == ["orbit-core>=0.1.0a1,<0.2"]
 
 
 class Note(BaseModel):
@@ -270,6 +280,51 @@ async def test_plugin_lazily_registers_and_closes_client_resource(
 
 
 @pytest.mark.asyncio
+async def test_plugin_contributes_a_read_only_control_room_ping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The UI connection check pings MongoDB and releases its temporary client."""
+    calls: list[str] = []
+
+    class FakeAdmin:
+        async def command(self, name: str) -> dict[str, int]:
+            calls.append(name)
+            return {"ok": 1}
+
+    class FakeClient:
+        def __init__(self, _uri: str, **_options: object) -> None:
+            self.admin = FakeAdmin()
+            self.closed = False
+
+        def __getitem__(self, _name: str) -> object:
+            class FakeDatabase:
+                def __getitem__(self, _collection_name: str) -> object:
+                    return object()
+
+            return FakeDatabase()
+
+        async def close(self) -> None:
+            self.closed = True
+
+    created: list[FakeClient] = []
+
+    def create_client(uri: str, **options: object) -> FakeClient:
+        client = FakeClient(uri, **options)
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(plugin_module, "AsyncMongoClient", create_client)
+    plugin = MongoPlugin(MongoConfig(uri=SecretStr("mongodb://localhost"), database="orders"))
+
+    result = await plugin.control_actions[0].handler({})
+
+    assert calls == ["ping"]
+    assert result is not None
+    assert result.summary == "MongoDB is reachable."
+    assert created[0].closed
+
+
+@pytest.mark.asyncio
 async def test_concurrent_database_close_waiters_share_cleanup() -> None:
     """Every caller waits for one client close before the resource becomes unavailable."""
     entered = asyncio.Event()
@@ -301,6 +356,66 @@ async def test_concurrent_database_close_waiters_share_cleanup() -> None:
     assert client.close_calls == 1
     with pytest.raises(RuntimeError, match="closed"):
         database.repository("notes", Note)
+
+
+@pytest.mark.asyncio
+async def test_failed_database_close_can_be_retried() -> None:
+    """A failed SDK close remains owned and a later shutdown call retries it."""
+
+    class DatabaseHandle:
+        def __getitem__(self, name: str) -> FakeCollection:
+            return FakeCollection()
+
+    class Client:
+        close_calls = 0
+        closed = False
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise RuntimeError("temporary driver close failure")
+            self.closed = True
+
+    client = Client()
+    database = MongoDatabase(DatabaseHandle(), client)
+    with pytest.raises(RuntimeError, match="temporary driver close failure"):
+        await database.aclose()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        database.repository("notes", Note)
+
+    await database.aclose()
+    await database.aclose()
+    assert client.closed
+    assert client.close_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_cancelled_driver_close_can_be_retried() -> None:
+    """A driver cancellation is retained as a failed attempt rather than mistaken for success."""
+
+    class DatabaseHandle:
+        def __getitem__(self, name: str) -> FakeCollection:
+            return FakeCollection()
+
+    class Client:
+        close_calls = 0
+        closed = False
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise asyncio.CancelledError
+            self.closed = True
+
+    client = Client()
+    database = MongoDatabase(DatabaseHandle(), client)
+    with pytest.raises(asyncio.CancelledError):
+        await database.aclose()
+
+    await database.aclose()
+    assert client.closed
+    assert client.close_calls == 2
 
 
 @pytest.mark.asyncio

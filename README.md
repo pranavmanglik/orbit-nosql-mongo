@@ -6,7 +6,9 @@ Core plugin that owns the async client through the application container. Core, 
 `orbit-nosql` do not depend on PyMongo.
 
 ```bash
-python -m pip install orbit-core orbit-data orbit-nosql orbit-nosql-mongo
+python -m pip install orbit-data orbit-nosql orbit-nosql-mongo
+# Add this extra when using the optional Core lifecycle plugin:
+python -m pip install 'orbit-nosql-mongo[core]'
 ```
 
 ## Application lifecycle
@@ -16,7 +18,8 @@ and `MongoPlugin` registers a lazy, Core-managed database resource:
 
 ```python
 from orbit import Application, ApplicationConfig
-from orbit_nosql_mongo import MongoConfig, MongoPlugin
+from orbit_nosql_mongo import MongoConfig
+from orbit_nosql_mongo.plugin import MongoPlugin
 
 application = Application(ApplicationConfig(name="orders"))
 application.plugins.register(
@@ -34,6 +37,10 @@ cancellation propagates, so Core shutdown and direct `database.aclose()` calls d
 the same client twice. For deployments, use TLS and a least-privilege database account, and provide
 the URI through a secret manager or protected environment configuration.
 
+The registered plugin contributes a read-only **Check MongoDB connection** action to Orbit CLI.
+It sends the driver's `ping` command, closes its temporary client, and does not expose the URI or
+driver exception text.
+
 ## Repository adapter
 
 The resolved resource implements `orbit_nosql.NoSQLDatabase`; it binds typed repositories to named
@@ -47,7 +54,8 @@ provider-neutral `RepositoryConflictError`; provider and model-validation errors
 ```python
 from pydantic import BaseModel
 
-from orbit_nosql_mongo import MongoRepository, MONGO_DATABASE_KEY
+from orbit_nosql_mongo import MongoRepository
+from orbit_nosql_mongo.plugin import MONGO_DATABASE_KEY
 
 
 class Order(BaseModel):
@@ -83,7 +91,7 @@ mypy
 To run the live service check, set `ORBIT_MONGO_URI` to a disposable MongoDB deployment and run
 `python -m pytest tests/test_mongo_integration.py`.
 
-This package is pre-alpha and its API is not stable. It supports Python 3.11 through 3.14.
+This package is in alpha and its API is not stable. It supports Python 3.11 through 3.14.
 
 Licensed under Apache-2.0.
 

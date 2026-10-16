@@ -85,9 +85,12 @@ class MongoDatabase(NoSQLDatabase):
         return MongoRepository(self._database[collection], model, key_field=key_field)
 
     async def aclose(self) -> None:
-        """Close the owning client once and finish cleanup before propagating cancellation."""
+        """Close the client, sharing active cleanup and retrying a failed close on later calls."""
         task = self._close_task
-        if task is None:
+        retry_failed_close = (
+            task is not None and task.done() and (task.cancelled() or task.exception() is not None)
+        )
+        if task is None or retry_failed_close:
             self._closed = True
             task = asyncio.create_task(self._client.close())
             self._close_task = task

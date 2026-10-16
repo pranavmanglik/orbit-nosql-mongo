@@ -4,11 +4,25 @@ This guide organizes runtime behavior documented by the package. It does not cer
 
 ## Configuration surface
 
-Environment names found in the package README:
+`MongoConfig` is constructed by the application; the library does not load environment variables
+or read a dotenv file. The opt-in integration test reads `ORBIT_MONGO_URI`, but that variable is
+not a runtime configuration contract. Load deployment secrets in the application and pass them
+to `MongoConfig`:
 
-- `ORBIT_MONGO_URI`
+```python
+import os
 
-Use the package README's constructor and deployment examples. Store credentials in a secret manager and avoid logging credentials, raw provider errors, request data, or opaque cursors.
+from orbit_nosql_mongo import MongoConfig
+from orbit_nosql_mongo.plugin import MongoPlugin
+
+config = MongoConfig(uri=os.environ["ORBIT_MONGO_URI"], database="orders")
+application.plugins.register(MongoPlugin(config))
+```
+
+`MongoConfig` also bounds server selection time (100–120,000 ms; default 5,000 ms) and pool size
+(1–10,000; default 100). The URI is stored as a redacted secret. Store it in a secret manager or
+protected runtime environment and do not log it, raw provider errors, request data, or opaque
+cursors.
 
 ## Lifecycle, failure behavior, and limits
 
@@ -18,7 +32,9 @@ Core plugin that owns the async client through the application container. Core, 
 `orbit-nosql` do not depend on PyMongo.
 
 ```bash
-python -m pip install orbit-core orbit-data orbit-nosql orbit-nosql-mongo
+python -m pip install orbit-data orbit-nosql orbit-nosql-mongo
+# Add the Core lifecycle plugin when needed:
+python -m pip install 'orbit-nosql-mongo[core]'
 ```
 
 ## Application lifecycle
@@ -28,7 +44,8 @@ and `MongoPlugin` registers a lazy, Core-managed database resource:
 
 ```python
 from orbit import Application, ApplicationConfig
-from orbit_nosql_mongo import MongoConfig, MongoPlugin
+from orbit_nosql_mongo import MongoConfig
+from orbit_nosql_mongo.plugin import MongoPlugin
 
 application = Application(ApplicationConfig(name="orders"))
 application.plugins.register(
@@ -43,8 +60,11 @@ the database after startup, when Core has run plugin setup and registered its re
 connection is scoped to the application's event loop; do not share it between threads, loops, or
 applications. Close completion is shared between concurrent callers and is allowed to finish before
 cancellation propagates, so Core shutdown and direct `database.aclose()` calls do not race to close
-the same client twice. For deployments, use TLS and a least-privilege database account, and provide
-the URI through a secret manager or protected environment configuration.
+the same client twice. If the driver's close call fails or is cancelled, the database remains
+unavailable and a later `database.aclose()` retries cleanup. For remote deployments, configure TLS
+certificate verification and a least-privilege database account. A plain local
+`mongodb://localhost` URI is suitable only for local development unless TLS is explicitly
+configured.
 
 ## Production validation
 

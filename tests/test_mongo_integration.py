@@ -9,7 +9,8 @@ import pytest
 from orbit import Application, ApplicationConfig
 from pydantic import BaseModel
 
-from orbit_nosql_mongo import MONGO_DATABASE_KEY, MongoConfig, MongoPlugin
+from orbit_nosql_mongo import MongoConfig
+from orbit_nosql_mongo.plugin import MONGO_DATABASE_KEY, MongoPlugin
 
 
 class _IntegrationDocument(BaseModel):

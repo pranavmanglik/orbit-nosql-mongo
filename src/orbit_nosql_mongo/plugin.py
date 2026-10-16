@@ -15,12 +15,12 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
 from orbit import Application
-from orbit.plugins import Plugin, PluginMetadata
+from orbit.plugins import ControlAction, ControlResult, Plugin, PluginMetadata
 from pymongo import AsyncMongoClient
 
 from orbit_nosql_mongo.config import MongoConfig
@@ -44,6 +44,14 @@ class MongoPlugin(Plugin):
         if not isinstance(config, MongoConfig):
             raise TypeError("MongoPlugin requires MongoConfig.")
         self._config = config
+        self.control_actions = (
+            ControlAction(
+                id="check-connection",
+                title="Check MongoDB connection",
+                description="Ping MongoDB using a temporary client that is closed afterward.",
+                handler=self._check_connection,
+            ),
+        )
 
     def setup(self, application: Application) -> None:
         """Register the database resource without connecting during composition."""
@@ -71,6 +79,12 @@ class MongoPlugin(Plugin):
                 await _close_client(client)
             else:
                 await resource.aclose()
+
+    async def _check_connection(self, _: Mapping[str, object]) -> ControlResult:
+        """Ping the configured MongoDB endpoint and close its temporary async client."""
+        async with self._managed_database():
+            pass
+        return ControlResult("MongoDB is reachable.")
 
 
 __all__ = ["MONGO_DATABASE_KEY", "MongoPlugin"]

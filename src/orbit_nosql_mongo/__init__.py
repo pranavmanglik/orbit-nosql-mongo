@@ -15,7 +15,6 @@
 
 from orbit_nosql_mongo.config import MongoConfig
 from orbit_nosql_mongo.database import MongoDatabase
-from orbit_nosql_mongo.plugin import MONGO_DATABASE_KEY, MongoPlugin
 from orbit_nosql_mongo.repository import (
     MongoCollection,
     MongoCursor,
@@ -25,13 +24,11 @@ from orbit_nosql_mongo.repository import (
 )
 
 __all__ = [
-    "MONGO_DATABASE_KEY",
     "MongoCollection",
     "MongoConfig",
     "MongoCursor",
     "MongoDocumentError",
     "MongoDatabase",
     "MongoOperationError",
-    "MongoPlugin",
     "MongoRepository",
 ]
